@@ -1,0 +1,156 @@
+# Databricks notebook source
+# MAGIC %pip install databricks-vectorsearch
+# MAGIC %pip install gradio
+
+# COMMAND ----------
+
+# Restart the Python environment (Databricks specific)
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+vs_endpoint_name = "<your_vector_search_endpoint_name>"
+vs_index_fullname = "<your_catalog>.<your_schema>.<your_index_name>"
+
+# COMMAND ----------
+
+from databricks.vector_search.client import VectorSearchClient
+from databricks.sdk import WorkspaceClient
+import databricks.sdk.service.catalog as c
+from langchain.embeddings import DatabricksEmbeddings
+from pprint import pprint
+
+# COMMAND ----------
+
+vsc = VectorSearchClient(disable_notice=True)
+vs_index = vsc.get_index(endpoint_name=vs_endpoint_name, index_name=vs_index_fullname)
+
+# COMMAND ----------
+
+def retrievers(query):
+    vsc = VectorSearchClient(disable_notice=True)
+    vs_index = vsc.get_index(endpoint_name=vs_endpoint_name, index_name=vs_index_fullname)
+    embeddings = DatabricksEmbeddings(endpoint="<your_embedding_model_endpoint>")
+    query_vector = embeddings.embed_query(query)
+    
+    results = vs_index.similarity_search(
+        query_vector=query_vector,
+        columns=["Product_Title"],
+        num_results=2
+    )
+
+    passages = [{"page_content": doc[0]} for doc in results.get("result", {}).get("data_array", [])]
+    return passages
+
+# COMMAND ----------
+
+question = "Do you have organic skincare products with anti-aging properties?"
+responses = retrievers(question)
+print(responses)
+
+# COMMAND ----------
+
+from langchain_community.chat_models import ChatDatabricks
+
+# Initialize chat model
+chat_model = ChatDatabricks(endpoint="<your_llm_endpoint>", max_tokens=300)
+
+# COMMAND ----------
+
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from typing import List, Callable
+from pydantic import Field
+
+class CustomRetriever(BaseRetriever):
+    retriever_func: Callable[[str], List[dict]] = Field(...)
+
+    def _init_(self, retriever_func: Callable[[str], List[dict]]):
+        super()._init_(retriever_func=retriever_func)
+        self.retriever_func = retriever_func
+
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        passages = self.retriever_func(query)
+        return [Document(page_content=doc.get("page_content", "")) for doc in passages]
+
+    async def aget_relevant_documents(self, query: str):
+        return self.get_relevant_documents(query)
+
+# Wrap retriever function
+retriever = CustomRetriever(retrievers)
+
+# COMMAND ----------
+
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.prompts import PromptTemplate
+
+TEMPLATE = """You are a store assistant. You are answering questions related to products. If the question is not related to one of these topics, kindly decline to answer. If you don't know the answer, just say you don’t have the information. Keep answers concise.
+
+Use the following context:
+<context>
+{context}
+</context>
+
+Question: {input}
+Answer:"""
+
+prompt = PromptTemplate(template=TEMPLATE, input_variables=["context", "input"])
+
+question_answer_chain = create_stuff_documents_chain(chat_model, prompt)
+chain = create_retrieval_chain(retriever, question_answer_chain)
+
+# COMMAND ----------
+
+question_dict = {"input": "Do you have organic skincare products with anti-aging properties?"}
+answer = chain.invoke(question_dict)
+print(answer['answer'])
+
+# COMMAND ----------
+
+from mlflow.models import infer_signature
+import mlflow
+import langchain
+import pandas as pd
+
+# Set registry URI
+mlflow.set_registry_uri("databricks-uc")
+model_name = "<your_catalog>.<your_schema>.<your_model_name>"
+
+# Prepare input/output data
+question_df = pd.DataFrame([{"question": question}])
+answer_df = pd.DataFrame([{"answer": answer}])
+
+with mlflow.start_run(run_name="product_assistant") as run:
+    signature = infer_signature(question_df, answer_df)
+    model_info = mlflow.langchain.log_model(
+        chain,
+        loader_fn=retrievers,
+        artifact_path="chain",
+        registered_model_name=model_name,
+        pip_requirements=[
+            "mlflow==" + mlflow.__version__,
+            "langchain==" + langchain.__version__,
+            "databricks-vectorsearch",
+        ],
+        input_example=question_df.to_dict(orient="records"),
+        signature=signature
+    )
+
+# COMMAND ----------
+
+import gradio as gr
+
+def process_question(user_question):
+    question_dict = {"input": user_question}
+    answer = chain.invoke(question_dict)
+    return answer['answer']
+
+iface = gr.Interface(
+    fn=process_question,
+    inputs=gr.Textbox(label="Enter your question"),
+    outputs=gr.Textbox(label="Answer"),
+    title="Smart AI Assistant for Products"
+)
+
+iface.launch(share=True, debug=True)
