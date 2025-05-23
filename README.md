@@ -1,4 +1,4 @@
-# 🛍️ AI-Powered Product Assistant with Databricks, LangChain, and MLflow
+# 🛍️ Smart AI Assistant System
 
 This project implements an end-to-end Retrieval-Augmented Generation (RAG) pipeline on **Databricks**, enabling natural language interaction with product data using embeddings, vector search, LangChain, and a Gradio interface.
 
