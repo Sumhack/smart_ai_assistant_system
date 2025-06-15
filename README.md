@@ -99,5 +99,3 @@ This project implements an end-to-end Retrieval-Augmented Generation (RAG) pipel
 
 ---
 
-## 🧰 Project Structure
-
